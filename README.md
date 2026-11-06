@@ -16,7 +16,7 @@ no C.
 Add this to the root file of the program that uses it:
 
 ```goose
-import cbor from "rekanalar/goose-cbor@v0.1.0";
+import cbor from "rekanalar/goose-cbor@v0.1.1";
 ```
 
 ## API
