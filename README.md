@@ -2,7 +2,7 @@
 
 [![ci](https://github.com/rekanalar/goose-cbor/actions/workflows/ci.yml/badge.svg)](https://github.com/rekanalar/goose-cbor/actions/workflows/ci.yml)
 
-CBOR encoding and decoding for the Goose programming language. The
+CBOR encoding and decoding for the [Goose](https://github.com/aardappel/goose) programming language. The
 rules are RFC 8949.
 
 The package encodes integers, byte strings, text strings, arrays, maps,
