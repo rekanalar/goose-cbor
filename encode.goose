@@ -18,22 +18,22 @@ fn write_head(out: u8[>..]&, major: i32, val: u64) {
         out.push(mt | (val as u8));
     } else if val <= 255 {
         out.push(mt | 24);
-        out.push(val as u8);
+        out.push((val & 255) as u8);
     } else if val <= 65535 {
         out.push(mt | 25);
-        out.push((val >> 8) as u8);
-        out.push(val as u8);
+        out.push(((val >> 8) & 255) as u8);
+        out.push((val & 255) as u8);
     } else if val <= 4294967295 {
         out.push(mt | 26);
-        out.push((val >> 24) as u8);
-        out.push((val >> 16) as u8);
-        out.push((val >> 8) as u8);
-        out.push(val as u8);
+        out.push(((val >> 24) & 255) as u8);
+        out.push(((val >> 16) & 255) as u8);
+        out.push(((val >> 8) & 255) as u8);
+        out.push((val & 255) as u8);
     } else {
         out.push(mt | 27);
         var shift = 56;
         while shift >= 0 {
-            out.push((val >> shift) as u8);
+            out.push(((val >> shift) & 255) as u8);
             shift -= 8;
         }
     }
@@ -262,15 +262,15 @@ fn encode_float(out: u8[>..]&, v: f64) {
     if exp == 2047 {
         let h: u64 = if frac == 0 { sign << 15 | 0x7c00 } else { 0x7e00 };
         out.push(0xf9);
-        out.push((h >> 8) as u8);
-        out.push(h as u8);
+        out.push(((h >> 8) & 255) as u8);
+        out.push((h & 255) as u8);
         return;
     }
     if frac == 0 && exp == 0 {
         let h = sign << 15;
         out.push(0xf9);
-        out.push((h >> 8) as u8);
-        out.push(h as u8);
+        out.push(((h >> 8) & 255) as u8);
+        out.push((h & 255) as u8);
         return;
     }
     // s is the significand with the implicit bit; a double subnormal
@@ -282,8 +282,8 @@ fn encode_float(out: u8[>..]&, v: f64) {
     if hok {
         let b = sign << 15 | h;
         out.push(0xf9);
-        out.push((b >> 8) as u8);
-        out.push(b as u8);
+        out.push(((b >> 8) & 255) as u8);
+        out.push((b & 255) as u8);
         return;
     }
     let w, sok = narrow_bits(s, ue, 23, -126, 127);
@@ -292,7 +292,7 @@ fn encode_float(out: u8[>..]&, v: f64) {
         out.push(0xfa);
         var shift = 24;
         while shift >= 0 {
-            out.push((b >> shift) as u8);
+            out.push(((b >> shift) & 255) as u8);
             shift -= 8;
         }
         return;
@@ -300,7 +300,7 @@ fn encode_float(out: u8[>..]&, v: f64) {
     out.push(0xfb);
     var shift = 56;
     while shift >= 0 {
-        out.push((bits >> shift) as u8);
+        out.push(((bits >> shift) & 255) as u8);
         shift -= 8;
     }
 }
@@ -315,7 +315,7 @@ fn encode_float64(out: u8[>..]&, v: f64) {
     out.push(0xfb);
     var shift = 56;
     while shift >= 0 {
-        out.push((bits >> shift) as u8);
+        out.push(((bits >> shift) & 255) as u8);
         shift -= 8;
     }
 }
