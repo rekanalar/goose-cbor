@@ -51,6 +51,7 @@ fn as_int(v: Value&) -> i64, bool {
         return v.uint as i64, true;
     }
     if v.kind == K_NEG {
+        if v.uint > 9223372036854775807 { return 0, false; }
         let m = v.uint as i64;
         return -m - 1, true;
     }
@@ -126,4 +127,43 @@ fn map_get(t: Tree&, v: Value&, key: const u8[:]) -> Value&, bool {
         if id >= 0 { id = t.values[id].next_sibling; }
     }
     return t.values[0], false;
+}
+
+// as_tag gives the tag number of a tag node. Another kind gives false.
+fn as_tag(v: Value&) -> u64, bool {
+    if v.kind != K_TAG { return 0, false; }
+    return v.uint, true;
+}
+
+// as_datetime_string gives the text of a tag 0 node. A tag with another
+// number, or content that is not text, gives false.
+fn as_datetime_string(t: Tree&, v: Value&) -> const u8[:], bool {
+    if v.kind != K_TAG || v.uint != 0 { return "", false; }
+    let c, ok .= child_at(t, v, 0);
+    if !ok { return "", false; }
+    return as_text(c);
+}
+
+// as_epoch gives the seconds since 1970 of a tag 1 node, as a float.
+// The content is an integer or a float.
+fn as_epoch(t: Tree&, v: Value&) -> f64, bool {
+    if v.kind != K_TAG || v.uint != 1 { return 0.0, false; }
+    let c, ok .= child_at(t, v, 0);
+    if !ok { return 0.0, false; }
+    let f, isf = as_float(c);
+    if isf { return f, true; }
+    let i, isi = as_int(c);
+    if isi { return i as f64, true; }
+    return 0.0, false;
+}
+
+// as_bignum reads a tag 2 or tag 3 node. It gives the negative flag and
+// the big-endian magnitude. For a negative node the integer is -1-mag.
+fn as_bignum(t: Tree&, v: Value&) -> bool, const u8[:], bool {
+    if v.kind != K_TAG || (v.uint != 2 && v.uint != 3) { return false, "", false; }
+    let c, ok .= child_at(t, v, 0);
+    if !ok { return false, "", false; }
+    let b, isb = as_bytes(c);
+    if !isb { return false, "", false; }
+    return v.uint == 3, b, true;
 }

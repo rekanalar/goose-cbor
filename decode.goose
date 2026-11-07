@@ -13,7 +13,6 @@ namespace cbor;
 import std;
 import math;
 import value;
-import encode;
 
 const MAX_DEPTH = 64;
 
@@ -83,6 +82,19 @@ fn half_to_f64(h: u64) -> f64 {
         return 0.0 / 0.0;
     }
     return sign * (1.0 + frac / 1024.0) * pow(2.0, exp - 15.0);
+}
+
+// single_to_f64 expands one single-precision value in the 32 bits.
+fn single_to_f64(bits: u64) -> f64 {
+    let sign = if (bits >> 31) & 1 == 1 { -1.0 } else { 1.0 };
+    let exp = ((bits >> 23) & 255) as i64;
+    let frac = (bits & 8388607) as f64;
+    if exp == 0 { return sign * frac * pow(2.0, -149.0); }
+    if exp == 255 {
+        if frac == 0.0 { return sign * 1.0e308 * 10.0; }
+        return 0.0 / 0.0;
+    }
+    return sign * (1.0 + frac / 8388608.0) * pow(2.0, exp - 127.0);
 }
 
 // bits_to_f64 rebuilds one f64 from its 64 bits.
@@ -216,7 +228,8 @@ fn read_one(s: const u8[:], pos: i64, values: Value[>..]&, scratch: u8[>..]&) ->
         return values.len as i32 - 1, pos, remaining, indefinite, true;
     }
     if info == 26 || info == 27 {
-        values.push(Value { kind: K_FLOAT, uint: 0, float: bits_to_f64(arg), span: s[0..0], first_child: -1, next_sibling: -1 });
+        let fv = if info == 26 { single_to_f64(arg) } else { bits_to_f64(arg) };
+        values.push(Value { kind: K_FLOAT, uint: 0, float: fv, span: s[0..0], first_child: -1, next_sibling: -1 });
         return values.len as i32 - 1, pos, remaining, indefinite, true;
     }
     // A simple value the package does not know.
@@ -316,6 +329,7 @@ fn read_int(s: const u8[:]) -> i64, const u8[:], bool {
         return arg as i64, s[pos..], true;
     }
     if mt == 1 {
+        if arg > 9223372036854775807 { return 0, s[0..0], false; }
         let m = arg as i64;
         return -m - 1, s[pos..], true;
     }
@@ -353,7 +367,8 @@ fn read_float(s: const u8[:]) -> f64, const u8[:], bool {
     if !read_head(s, pos, mt, arg) { return 0.0, s[0..0], false; }
     if mt != 7 { return 0.0, s[0..0], false; }
     if info == 25 { return half_to_f64(arg), s[pos..], true; }
-    if info == 26 || info == 27 { return bits_to_f64(arg), s[pos..], true; }
+    if info == 26 { return single_to_f64(arg), s[pos..], true; }
+    if info == 27 { return bits_to_f64(arg), s[pos..], true; }
     return 0.0, s[0..0], false;
 }
 

@@ -101,10 +101,10 @@ fn test_rfc_vectors() {
     expect_bytes(out, "f6");
     out = [];
     cbor::encode_float(out, 1.0);
-    expect_bytes(out, "fb3ff0000000000000");
+    expect_bytes(out, "f93c00");
     out = [];
     cbor::encode_float(out, 100000.0);
-    expect_bytes(out, "fb40f86a0000000000");
+    expect_bytes(out, "fa47c35000");
     out = [];
     cbor::encode_float(out, 1.0e300);
     expect_bytes(out, "fb7e37e43c8800759c");
@@ -421,6 +421,215 @@ fn test_large_document() {
     assert(cbor::array_len(t, root) == 40000);
 }
 
+
+// float_case encodes v in the shortest form, checks the RFC bytes, then
+// decodes them and checks the value comes back.
+fn float_case(v: f64, want_hex: const u8[:]) {
+    var out: u8[>..] = [];
+    cbor::encode_float(out, v);
+    expect_bytes(out, want_hex);
+    let back, rest, ok = cbor::read_float(out[..]);
+    assert(ok && rest.len == 0);
+    if v == v { assert(back == v); } else { assert(back != back); }
+}
+
+fn test_shortest_float() {
+    // RFC 8949 appendix A.
+    float_case(0.0, "f90000");
+    float_case(-0.0, "f98000");
+    float_case(1.0, "f93c00");
+    float_case(1.1, "fb3ff199999999999a");
+    float_case(1.5, "f93e00");
+    float_case(65504.0, "f97bff");
+    float_case(100000.0, "fa47c35000");
+    float_case(3.4028234663852886e+38, "fa7f7fffff");
+    float_case(1.0e+300, "fb7e37e43c8800759c");
+    float_case(5.960464477539063e-8, "f90001");
+    float_case(0.00006103515625, "f90400");
+    float_case(-4.0, "f9c400");
+    float_case(-4.1, "fbc010666666666666");
+    float_case(1.0 / 0.0, "f97c00");
+    float_case(-1.0 / 0.0, "f9fc00");
+    float_case(0.0 / 0.0, "f97e00");
+    // RFC 8949 section 4.1 examples.
+    float_case(5.5, "f94580");
+    float_case(5555.5, "fa45ad9c00");
+    float_case(1000000.5, "fa49742408");
+    // Just past the half range and a f32 subnormal.
+    float_case(65536.0, "fa47800000");
+    float_case(1.401298464324817e-45, "fa00000001");
+    float_case(5e-324, "fb0000000000000001");
+    // The full form stays on request.
+    var out: u8[>..] = [];
+    cbor::encode_float64(out, 1.0);
+    expect_bytes(out, "fb3ff0000000000000");
+    out = [];
+    cbor::encode_float64(out, 0.0 / 0.0);
+    expect_bytes(out, "fb7ff8000000000000");
+}
+
+fn test_decode_single_float() {
+    // RFC 8949 appendix A: 0xfa47c35000 is 100000.0, 0xfa7f7fffff is max f32.
+    var v: cbor::Value[>..] = [];
+    var s: u8[>..] = [];
+    var b: u8[>..] = [];
+    let t, ok = decode_hex("fa47c35000", b, v, s);
+    assert(ok);
+    let f, g = cbor::as_float(t.values[t.root]);
+    assert(g && f == 100000.0);
+    var v2: cbor::Value[>..] = [];
+    var s2: u8[>..] = [];
+    var b2: u8[>..] = [];
+    let t2, ok2 = decode_hex("fa7f7fffff", b2, v2, s2);
+    assert(ok2);
+    let f2, g2 = cbor::as_float(t2.values[t2.root]);
+    assert(g2 && f2 == 3.4028234663852886e+38);
+}
+
+fn test_int_limits() {
+    var out: u8[>..] = [];
+    cbor::encode_int(out, -9223372036854775807 - 1);
+    expect_bytes(out, "3b7fffffffffffffff");
+    let v, rest, ok = cbor::read_int(out[..]);
+    assert(ok && v == -9223372036854775807 - 1);
+    // -2^64 is beyond i64: the read faults.
+    var big: u8[>..] = [];
+    hex(big, "3bffffffffffffffff");
+    let v2, rest2, ok2 = cbor::read_int(big[..]);
+    assert(!ok2);
+}
+
+// The RFC 8949 section 4.2.1 key order: 10, 100, -1, "z", "aa", [100],
+// [-1], false. The test writes them in the reverse order.
+fn test_sorted_map() {
+    var out: u8[>..] = [];
+    var tmp: u8[>..] = [];
+    cbor::encode_map_head(out, 8);
+    let start = out.len;
+    cbor::encode_bool(out, false);
+    cbor::encode_uint(out, 8);
+    cbor::encode_array_head(out, 1);
+    cbor::encode_int(out, -1);
+    cbor::encode_uint(out, 7);
+    cbor::encode_array_head(out, 1);
+    cbor::encode_uint(out, 100);
+    cbor::encode_uint(out, 6);
+    cbor::encode_text(out, "aa");
+    cbor::encode_uint(out, 5);
+    cbor::encode_text(out, "z");
+    cbor::encode_uint(out, 4);
+    cbor::encode_int(out, -1);
+    cbor::encode_uint(out, 3);
+    cbor::encode_uint(out, 100);
+    cbor::encode_uint(out, 2);
+    cbor::encode_uint(out, 10);
+    cbor::encode_uint(out, 1);
+    assert(cbor::sort_map(out, start, 8, tmp));
+    expect_bytes(out, "a80a011864022003617a046261610581186406812007f408");
+
+    // The RFC example map {"a": 1, "b": [2, 3]} written in reverse.
+    out = [];
+    tmp = [];
+    cbor::encode_map_head(out, 2);
+    let s2 = out.len;
+    cbor::encode_text(out, "b");
+    cbor::encode_array_head(out, 2);
+    cbor::encode_uint(out, 2);
+    cbor::encode_uint(out, 3);
+    cbor::encode_text(out, "a");
+    cbor::encode_uint(out, 1);
+    assert(cbor::sort_map(out, s2, 2, tmp));
+    expect_bytes(out, "a26161016162820203");
+
+    // A nested map sorts first, then the outer map.
+    out = [];
+    tmp = [];
+    cbor::encode_map_head(out, 2);
+    let s3 = out.len;
+    cbor::encode_text(out, "b");
+    cbor::encode_map_head(out, 2);
+    let s4 = out.len;
+    cbor::encode_text(out, "y");
+    cbor::encode_uint(out, 1);
+    cbor::encode_text(out, "x");
+    cbor::encode_uint(out, 2);
+    assert(cbor::sort_map(out, s4, 2, tmp));
+    cbor::encode_text(out, "a");
+    cbor::encode_uint(out, 0);
+    tmp = [];
+    assert(cbor::sort_map(out, s3, 2, tmp));
+    expect_bytes(out, "a26161006162a2617802617901");
+
+    // A wrong pair count gives false and leaves the bytes alone.
+    out = [];
+    tmp = [];
+    cbor::encode_map_head(out, 2);
+    let s5 = out.len;
+    cbor::encode_uint(out, 1);
+    cbor::encode_uint(out, 2);
+    assert(!cbor::sort_map(out, s5, 2, tmp));
+}
+
+fn test_named_tags() {
+    var out: u8[>..] = [];
+    cbor::encode_datetime_string(out, "2013-03-21T20:04:00Z");
+    expect_bytes(out, "c074323031332d30332d32315432303a30343a30305a");
+    out = [];
+    cbor::encode_epoch(out, 1363896240);
+    expect_bytes(out, "c11a514b67b0");
+    out = [];
+    cbor::encode_epoch_float(out, 1363896240.5);
+    expect_bytes(out, "c1fb41d452d9ec200000");
+    out = [];
+    cbor::encode_decimal(out, -2, 27315);
+    expect_bytes(out, "c48221196ab3");
+    // 2^64 and -2^64-1, with a leading zero byte that drops away.
+    var mag: u8[>..] = [];
+    hex(mag, "00010000000000000000");
+    out = [];
+    cbor::encode_bignum(out, false, mag[..]);
+    expect_bytes(out, "c249010000000000000000");
+    out = [];
+    cbor::encode_bignum(out, true, mag[..]);
+    expect_bytes(out, "c349010000000000000000");
+    // A small magnitude uses the plain integer form.
+    var small: u8[>..] = [0, 0, 1, 0];
+    out = [];
+    cbor::encode_bignum(out, false, small[..]);
+    expect_bytes(out, "190100");
+    out = [];
+    cbor::encode_bignum(out, true, small[..]);
+    expect_bytes(out, "390100");
+
+    // The accessors read them back.
+    var v: cbor::Value[>..] = [];
+    var s: u8[>..] = [];
+    var b: u8[>..] = [];
+    let t, ok = decode_hex("c1fb41d452d9ec200000", b, v, s);
+    assert(ok);
+    let tn, istag = cbor::as_tag(t.values[t.root]);
+    assert(istag && tn == cbor::TAG_EPOCH);
+    let secs, isep = cbor::as_epoch(t, t.values[t.root]);
+    assert(isep && secs == 1363896240.5);
+    var v2: cbor::Value[>..] = [];
+    var s2: u8[>..] = [];
+    var b2: u8[>..] = [];
+    let t2, ok2 = decode_hex("c249010000000000000000", b2, v2, s2);
+    assert(ok2);
+    let neg, m, isbig = cbor::as_bignum(t2, t2.values[t2.root]);
+    assert(isbig && !neg && m.len == 9 && m[0] == 1);
+    var v3: cbor::Value[>..] = [];
+    var s3: u8[>..] = [];
+    var b3: u8[>..] = [];
+    let t3, ok3 = decode_hex("c074323031332d30332d32315432303a30343a30305a", b3, v3, s3);
+    assert(ok3);
+    let txt, isdt = cbor::as_datetime_string(t3, t3.values[t3.root]);
+    assert(isdt && txt == "2013-03-21T20:04:00Z");
+    // A different tag is not a date.
+    let none, notdt = cbor::as_datetime_string(t, t.values[t.root]);
+    assert(!notdt);
+}
+
 fn main() {
     test_rfc_vectors();
     test_encode_array_map();
@@ -434,6 +643,11 @@ fn main() {
     test_typed_api();
     test_roundtrip_tree();
     test_large_document();
+    test_shortest_float();
+    test_decode_single_float();
+    test_int_limits();
+    test_sorted_map();
+    test_named_tags();
     print("all tests passed");
     return 0;
 }
