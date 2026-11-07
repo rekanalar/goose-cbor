@@ -63,22 +63,6 @@ not n pairs.
 - `f7` is `undefined`. The simple values 0 to 19 and 32 to 255 decode as simple values.
 - The two-byte forms of 0 to 31, and the bytes `fc` to `fe`, give false.
 
-## Changes in v0.3.0
-
-These inputs gave a value in v0.2.1 and give false now:
-
-- `1f` and `3f`, which read as the number 31
-- an indefinite map with a key and no value
-- a text string that is not valid UTF-8
-- a container with a count above the bytes left. A count of 2^64 minus 1 gave true. A count of 2^63 or more in a string aborted.
-
-These inputs gave false in v0.2.1 and give a value now:
-
-- `f7`, `e0` to `f3`, and `f820` to `f8ff`
-- a byte string, text string, array or map of exactly 31 items in the form `581f`, `781f`, `981f` or `b81f`
-
-The encoder gives the same bytes as before. It no longer aborts under `--debug`.
-
 ## Limits
 
 - The order is bytewise (RFC 8949). It is not the length-first order of
