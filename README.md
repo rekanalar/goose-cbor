@@ -37,6 +37,13 @@ and byte payloads are spans over the input, so the input must outlive
 the tree. The decode walk uses an explicit stack with a depth cap of
 64; deeper input faults.
 
+## Test
+
+```bash
+goose run test/run.goose
+goose run examples/roundtrip.goose
+```
+
 ## License
 
 MIT
