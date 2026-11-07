@@ -18,6 +18,8 @@ const K_TAG = 6;
 const K_BOOL = 7;
 const K_NULL = 8;
 const K_FLOAT = 9;
+const K_UNDEFINED = 10;
+const K_SIMPLE = 11;
 
 // Value holds one decoded value.
 struct Value {
@@ -166,4 +168,16 @@ fn as_bignum(t: Tree&, v: Value&) -> bool, const u8[:], bool {
     let b, isb = as_bytes(c);
     if !isb { return false, "", false; }
     return v.uint == 3, b, true;
+}
+
+// as_undefined says whether the node is the undefined value (byte f7).
+fn as_undefined(v: Value&) -> bool {
+    return v.kind == K_UNDEFINED;
+}
+
+// as_simple gives the number of a simple value node. The numbers are 0 to
+// 19 and 32 to 255. Another kind gives false.
+fn as_simple(v: Value&) -> u64, bool {
+    if v.kind != K_SIMPLE { return 0, false; }
+    return v.uint, true;
 }

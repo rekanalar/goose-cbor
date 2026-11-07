@@ -55,6 +55,16 @@ jobs:
         env:
           GOOSE_HOME: ${{ runner.temp }}/goose-home
 
+      - name: Run the examples
+        run: |
+          set -e
+          for f in examples/*.goose; do
+            echo "== $f"
+            goose run "$f"
+          done
+        env:
+          GOOSE_HOME: ${{ runner.temp }}/goose-home
+
       - name: Report the failure
         if: failure()
         run: |

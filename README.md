@@ -12,14 +12,14 @@ value. A map has the core deterministic order (section 4.2.1) after
 tags.
 
 The decoder gives a tree of typed values, or one value at a time.
-Broken bytes fault instead of giving partial values. Pure Goose, no C.
+Broken bytes fault instead of giving partial values. The decoder never aborts on hostile input. Pure Goose, no C.
 
 ## Install
 
 Add this to the root file of the program that uses it:
 
 ```goose
-import cbor from "rekanalar/goose-cbor@v0.2.1";
+import cbor from "rekanalar/goose-cbor@v0.3.0";
 ```
 
 ## API
@@ -40,7 +40,8 @@ import cbor from "rekanalar/goose-cbor@v0.2.1";
 | `read_float`, `read_bool`, `read_null` | read one typed value from the front |
 
 The tree access helpers are `as_uint`, `as_int`, `as_text`, `as_bytes`,
-`as_float`, `as_bool`, `child_at`, `array_len` and `map_get`. The tag
+`as_float`, `as_bool`, `child_at`, `array_len` and `map_get`.
+`as_undefined` and `as_simple` read the simple values. The tag
 helpers are `as_tag`, `as_datetime_string`, `as_epoch` and `as_bignum`.
 The constants `TAG_EPOCH`, `TAG_BIGNUM_POS` and the like name the tags. The text
 and byte payloads are spans over the input, so the input must outlive
@@ -53,6 +54,30 @@ Write the map head, note `start = out.len`, and write the pairs in any
 order. Then call `sort_map(out, start, n, tmp)`. Sort a nested map
 before the map that holds it. `sort_map` gives false when the bytes are
 not n pairs.
+
+## What the decoder checks
+
+- A string length and a container count must fit in the bytes that are left. A bad one gives false and never aborts.
+- The head bytes `1f`, `3f` and `df` give false. An indefinite map with a key and no value gives false.
+- A text string holds valid UTF-8 only. The same holds for each chunk of an indefinite text string.
+- `f7` is `undefined`. The simple values 0 to 19 and 32 to 255 decode as simple values.
+- The two-byte forms of 0 to 31, and the bytes `fc` to `fe`, give false.
+
+## Changes in v0.3.0
+
+These inputs gave a value in v0.2.1 and give false now:
+
+- `1f` and `3f`, which read as the number 31
+- an indefinite map with a key and no value
+- a text string that is not valid UTF-8
+- a container with a count above the bytes left. A count of 2^64 minus 1 gave true. A count of 2^63 or more in a string aborted.
+
+These inputs gave false in v0.2.1 and give a value now:
+
+- `f7`, `e0` to `f3`, and `f820` to `f8ff`
+- a byte string, text string, array or map of exactly 31 items in the form `581f`, `781f`, `981f` or `b81f`
+
+The encoder gives the same bytes as before. It no longer aborts under `--debug`.
 
 ## Limits
 
@@ -67,13 +92,25 @@ not n pairs.
 - A bignum has no conversion to a number type.
 - The decoder accepts non-preferred forms and indefinite lengths. It
   does not check that the input is deterministic.
+- `decode` reads one document. Bytes after it give false. Python `cbor2` skips them.
+- `decode` checks no tag content. `as_datetime_string`, `as_epoch` and `as_bignum` check it and give false. `cbor2` checks at decode.
+- The depth limit is 64. `cbor2` has no limit and Go `fxamacker/cbor` stops at 32 by default.
+- A duplicate map key is accepted, as `cbor2` does.
+- A decoded NaN keeps no payload and no sign. The bits of the NaN depend on the CPU.
 
 ## Test
+
+The test program holds 850 generated cases from `cbor2`. They are 281 decode cases,
+122 accept cases, 205 refuse cases and 242 encoder cases. The script
+`test/make_cbor_cases.py` makes them with a fixed seed. Hand cases hold the 97
+inputs of the audit against `cbor2` and `fxamacker/cbor`. The hostile cases
+must finish in under one second.
 
 ```bash
 goose run test/run.goose
 goose run examples/roundtrip.goose
 goose run examples/deterministic.goose
+goose run examples/untrusted.goose
 ```
 
 ## License

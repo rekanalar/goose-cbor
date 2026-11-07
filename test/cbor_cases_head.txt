@@ -1,0 +1,134 @@
+namespace cbor_cases;
+
+import std;
+import cbor from "..";
+
+const HEXD = "0123456789abcdef";
+
+fn put_hex(out: u8[>..]&, b: const u8[:]) {
+    for c in b {
+        out.push(HEXD[(c >> 4) as i32]);
+        out.push(HEXD[(c & 15) as i32]);
+    }
+}
+
+// render writes the text form of the node. The form is the same one that
+// make_cbor_cases.py gives for the cbor2 value.
+recursive fn render(t: cbor::Tree&, at: i32, out: u8[>..]&) {
+    let kind = t.values[at].kind;
+    if kind == cbor::K_UINT {
+        out.push('u');
+        format(out, t.values[at].uint);
+    } else if kind == cbor::K_NEG {
+        out.push('n');
+        format(out, t.values[at].uint);
+    } else if kind == cbor::K_BYTES {
+        out.push('b');
+        put_hex(out, t.values[at].span);
+    } else if kind == cbor::K_TEXT {
+        out.push('t');
+        put_hex(out, t.values[at].span);
+    } else if kind == cbor::K_BOOL {
+        out.push(if t.values[at].uint == 1 { 'T' } else { 'F' });
+    } else if kind == cbor::K_NULL {
+        out.push('N');
+    } else if kind == cbor::K_UNDEFINED {
+        out.push('U');
+    } else if kind == cbor::K_SIMPLE {
+        out.push('s');
+        format(out, t.values[at].uint);
+    } else if kind == cbor::K_FLOAT {
+        out.push('f');
+        if t.values[at].float != t.values[at].float {
+            out.append("nan");
+            return;
+        }
+        let bits = cbor::f64_bits(t.values[at].float);
+        var k = 7;
+        while k >= 0 {
+            let b = ((bits >> (8 * k as u64)) & 255) as u8;
+            out.push(HEXD[(b >> 4) as i32]);
+            out.push(HEXD[(b & 15) as i32]);
+            k -= 1;
+        }
+    } else if kind == cbor::K_ARRAY || kind == cbor::K_MAP {
+        let is_map = kind == cbor::K_MAP;
+        out.push(if is_map { '{' } else { '[' });
+        var c = t.values[at].first_child;
+        var n = 0;
+        while c >= 0 {
+            if n > 0 {
+                out.push(if is_map && n % 2 == 1 { ':' } else { ',' });
+            }
+            render(t, c, out);
+            c = t.values[c].next_sibling;
+            n += 1;
+        }
+        out.push(if is_map { '}' } else { ']' });
+    } else {
+        out.push('?');
+    }
+}
+
+fn fail(what: const u8[:], bytes: const u8[:]) {
+    var h: u8[>..] = [];
+    put_hex(h, bytes);
+    print("FAIL ", what, " bytes ", h);
+    assert(false);
+}
+
+// expect_decode checks that the bytes decode and render to want.
+fn expect_decode(s: const u8[:], want: const u8[:]) {
+    var values: cbor::Value[>..] = [];
+    var scratch: u8[>..] = [];
+    let t, ok = cbor::decode(s, values, scratch);
+    if !ok { fail("refused", s); }
+    var got: u8[>..] = [];
+    render(t, t.root, got);
+    if got != want {
+        var h: u8[>..] = [];
+        put_hex(h, s);
+        print("FAIL decode ", h, " want ", want, " got ", got);
+        assert(false);
+    }
+}
+
+// expect_accept is the same check: cbor2 accepts the bytes and the tree must render alike.
+fn expect_accept(s: const u8[:], want: const u8[:]) {
+    expect_decode(s, want);
+}
+
+fn expect_refuse(s: const u8[:]) {
+    var values: cbor::Value[>..] = [];
+    var scratch: u8[>..] = [];
+    let t, ok = cbor::decode(s, values, scratch);
+    if ok { fail("accepted", s); }
+}
+
+fn expect_enc(got: u8[>..]&, want: const u8[:], what: const u8[:]) {
+    if got != want { fail(what, want); }
+}
+
+fn expect_enc_uint(v: u64, want: const u8[:]) {
+    var out: u8[>..] = [];
+    cbor::encode_uint(out, v);
+    expect_enc(out, want, "encode_uint");
+}
+
+fn expect_enc_int(v: i64, want: const u8[:]) {
+    var out: u8[>..] = [];
+    cbor::encode_int(out, v);
+    expect_enc(out, want, "encode_int");
+}
+
+fn expect_enc_float(v: f64, want: const u8[:]) {
+    var out: u8[>..] = [];
+    cbor::encode_float(out, v);
+    expect_enc(out, want, "encode_float");
+}
+
+fn expect_enc_big(neg: bool, mag: const u8[:], want: const u8[:]) {
+    var out: u8[>..] = [];
+    cbor::encode_bignum(out, neg, mag);
+    expect_enc(out, want, "encode_bignum");
+}

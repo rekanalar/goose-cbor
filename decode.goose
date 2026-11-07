@@ -129,18 +129,58 @@ fn bits_to_f64(bits: u64) -> f64 {
     return signed(sign, (4503599627370496 + frac) * pow2(exp - 1075));
 }
 
+// valid_utf8 says whether b is well-formed UTF-8: no overlong form, no
+// surrogate (U+D800 to U+DFFF) and nothing above U+10FFFF. One pass.
+fn valid_utf8(b: const u8[:]) -> bool {
+    let n = b.len;
+    var i: i64 = 0;
+    while i < n {
+        let c = b[i];
+        if c < 0x80 {
+            i += 1;
+        } else if c >= 0xc2 && c <= 0xdf {
+            if i + 1 >= n || (b[i + 1] & 0xc0) != 0x80 { return false; }
+            i += 2;
+        } else if c >= 0xe0 && c <= 0xef {
+            if i + 2 >= n { return false; }
+            let c1 = b[i + 1];
+            if (c1 & 0xc0) != 0x80 || (b[i + 2] & 0xc0) != 0x80 { return false; }
+            if c == 0xe0 && c1 < 0xa0 { return false; }
+            if c == 0xed && c1 >= 0xa0 { return false; }
+            i += 3;
+        } else if c >= 0xf0 && c <= 0xf4 {
+            if i + 3 >= n { return false; }
+            let c1 = b[i + 1];
+            if (c1 & 0xc0) != 0x80 || (b[i + 2] & 0xc0) != 0x80 || (b[i + 3] & 0xc0) != 0x80 { return false; }
+            if c == 0xf0 && c1 < 0x90 { return false; }
+            if c == 0xf4 && c1 >= 0x90 { return false; }
+            i += 4;
+        } else {
+            return false;
+        }
+    }
+    return true;
+}
+
 // One work item of the explicit stack: a container that still needs
 // children. remaining holds the count of children to read, or -1 for an
-// indefinite container.
+// indefinite container. last holds the node of the last child, so a new
+// child links in one step. kids counts the children read so far.
 struct Work {
     parent: i32,
     remaining: i64,
+    last: i32,
+    kids: i64,
 }
 
 // read_one reads one value at pos and pushes the node. It gives the
-// node index, the child count (with maps doubled), or -1 when the
-// value needs no children, and the indefinite flag. A fault gives a
-// negative node index.
+// node index, the new position, the child count (with maps doubled) or -1
+// when the value needs no children, the indefinite flag and the success
+// flag. A fault gives a negative node index.
+//
+// Every declared length and count is compared with the bytes left as an
+// unsigned value before it is cast. The count cannot reach the value -1
+// that means "no children", and no sum can overflow.
 fn read_one(s: const u8[:], pos: i64, values: Value[>..]&, scratch: u8[>..]&) -> i32, i64, i64, bool, bool {
     var remaining: i64 = -1;
     var indefinite = false;
@@ -152,16 +192,19 @@ fn read_one(s: const u8[:], pos: i64, values: Value[>..]&, scratch: u8[>..]&) ->
     if major == 7 && info == 31 { return -1, pos, remaining, indefinite, false; }
     var mt: i32 = 0;
     var arg: u64 = 0;
-    if !read_head(s, pos, mt, arg) {
-        if info == 31 {
-            arg = 31;
-            mt = major;
-        } else {
-            return -1, pos, remaining, indefinite, false;
-        }
+    // The indefinite head has its own flag. The argument 31 is also a
+    // plain length, so it cannot mark it.
+    var indef = false;
+    if info == 31 {
+        // Only strings, arrays and maps have an indefinite head.
+        if major < 2 || major > 5 { return -1, pos, remaining, indefinite, false; }
+        mt = major;
+        pos += 1;
+        indef = true;
+    } else if !read_head(s, pos, mt, arg) {
+        return -1, pos, remaining, indefinite, false;
     }
-    indefinite = false;
-    remaining = -1;
+    let left = (s.len - pos) as u64;
     if mt == 0 {
         values.push(Value { kind: K_UINT, uint: arg, float: 0.0, span: s[0..0], first_child: -1, next_sibling: -1 });
         return values.len as i32 - 1, pos, remaining, indefinite, true;
@@ -172,14 +215,16 @@ fn read_one(s: const u8[:], pos: i64, values: Value[>..]&, scratch: u8[>..]&) ->
     }
     if mt == 2 || mt == 3 {
         let kind: i32 = if mt == 2 { K_BYTES } else { K_TEXT };
-        if arg != 31 {
+        if !indef {
+            if arg > left { return -1, pos, remaining, indefinite, false; }
             let n = arg as i64;
-            if pos + n > s.len { return -1, pos, remaining, indefinite, false; }
-            values.push(Value { kind: kind, uint: 0, float: 0.0, span: s[pos..pos + n], first_child: -1, next_sibling: -1 });
+            let span = s[pos..pos + n];
+            if mt == 3 && !valid_utf8(span) { return -1, pos, remaining, indefinite, false; }
+            values.push(Value { kind: kind, uint: 0, float: 0.0, span: span, first_child: -1, next_sibling: -1 });
             pos += n;
             return values.len as i32 - 1, pos, remaining, indefinite, true;
         }
-        // Indefinite: chunks until the break byte.
+        // Indefinite: definite chunks of the same type until the break byte.
         let joined_at = scratch.len;
         while true {
             if pos >= s.len { return -1, pos, remaining, indefinite, false; }
@@ -187,20 +232,16 @@ fn read_one(s: const u8[:], pos: i64, values: Value[>..]&, scratch: u8[>..]&) ->
                 pos += 1;
                 break;
             }
+            if (s[pos] & 31) == 31 { return -1, pos, remaining, indefinite, false; }
             var cmt: i32 = 0;
             var carg: u64 = 0;
-            if !read_head(s, pos, cmt, carg) {
-                if (s[pos] & 31) == 31 {
-                    cmt = s[pos] >> 5;
-                    carg = 31;
-                } else {
-                    return -1, pos, remaining, indefinite, false;
-                }
-            }
-            if cmt != mt || carg == 31 { return -1, pos, remaining, indefinite, false; }
+            if !read_head(s, pos, cmt, carg) { return -1, pos, remaining, indefinite, false; }
+            if cmt != mt { return -1, pos, remaining, indefinite, false; }
+            if carg > (s.len - pos) as u64 { return -1, pos, remaining, indefinite, false; }
             let n = carg as i64;
-            if pos + n > s.len { return -1, pos, remaining, indefinite, false; }
-            scratch.append(s[pos..pos + n]);
+            let chunk = s[pos..pos + n];
+            if mt == 3 && !valid_utf8(chunk) { return -1, pos, remaining, indefinite, false; }
+            scratch.append(chunk);
             pos += n;
         }
         values.push(Value { kind: kind, uint: 0, float: 0.0, span: scratch[joined_at..scratch.len], first_child: -1, next_sibling: -1 });
@@ -208,9 +249,12 @@ fn read_one(s: const u8[:], pos: i64, values: Value[>..]&, scratch: u8[>..]&) ->
     }
     if mt == 4 || mt == 5 {
         let kind: i32 = if mt == 4 { K_ARRAY } else { K_MAP };
-        if arg != 31 {
+        if !indef {
+            // Each child takes at least one byte, so the count cannot pass the bytes left.
+            if arg > left { return -1, pos, remaining, indefinite, false; }
             remaining = arg as i64;
             if mt == 5 { remaining *= 2; }
+            if remaining > left as i64 { return -1, pos, remaining, indefinite, false; }
         } else {
             indefinite = true;
             remaining = -1;
@@ -224,6 +268,10 @@ fn read_one(s: const u8[:], pos: i64, values: Value[>..]&, scratch: u8[>..]&) ->
         return values.len as i32 - 1, pos, remaining, indefinite, true;
     }
     // Major 7.
+    if info < 20 {
+        values.push(Value { kind: K_SIMPLE, uint: arg, float: 0.0, span: s[0..0], first_child: -1, next_sibling: -1 });
+        return values.len as i32 - 1, pos, remaining, indefinite, true;
+    }
     if info == 20 {
         values.push(Value { kind: K_BOOL, uint: 0, float: 0.0, span: s[0..0], first_child: -1, next_sibling: -1 });
         return values.len as i32 - 1, pos, remaining, indefinite, true;
@@ -236,7 +284,16 @@ fn read_one(s: const u8[:], pos: i64, values: Value[>..]&, scratch: u8[>..]&) ->
         values.push(Value { kind: K_NULL, uint: 0, float: 0.0, span: s[0..0], first_child: -1, next_sibling: -1 });
         return values.len as i32 - 1, pos, remaining, indefinite, true;
     }
-    if info == 23 { return -1, pos, remaining, indefinite, false; }
+    if info == 23 {
+        values.push(Value { kind: K_UNDEFINED, uint: 0, float: 0.0, span: s[0..0], first_child: -1, next_sibling: -1 });
+        return values.len as i32 - 1, pos, remaining, indefinite, true;
+    }
+    if info == 24 {
+        // The two-byte form holds the simple values 32 to 255 only.
+        if arg < 32 { return -1, pos, remaining, indefinite, false; }
+        values.push(Value { kind: K_SIMPLE, uint: arg, float: 0.0, span: s[0..0], first_child: -1, next_sibling: -1 });
+        return values.len as i32 - 1, pos, remaining, indefinite, true;
+    }
     if info == 25 {
         values.push(Value { kind: K_FLOAT, uint: 0, float: half_to_f64(arg), span: s[0..0], first_child: -1, next_sibling: -1 });
         return values.len as i32 - 1, pos, remaining, indefinite, true;
@@ -246,7 +303,6 @@ fn read_one(s: const u8[:], pos: i64, values: Value[>..]&, scratch: u8[>..]&) ->
         values.push(Value { kind: K_FLOAT, uint: 0, float: fv, span: s[0..0], first_child: -1, next_sibling: -1 });
         return values.len as i32 - 1, pos, remaining, indefinite, true;
     }
-    // A simple value the package does not know.
     return -1, pos, remaining, indefinite, false;
 }
 
@@ -255,8 +311,6 @@ fn read_one(s: const u8[:], pos: i64, values: Value[>..]&, scratch: u8[>..]&) ->
 // 64. The scratch buffer holds the joined bytes of indefinite strings.
 fn decode_value(s: const u8[:], pos: i64&, values: Value[>..]&, scratch: u8[>..]&) -> i32, bool {
     var stack: Work[>..] = [];
-    var remaining: i64 = -1;
-    var indefinite = false;
 
     var root_remaining: i64 = -1;
     var root_indef = false;
@@ -265,7 +319,7 @@ fn decode_value(s: const u8[:], pos: i64&, values: Value[>..]&, scratch: u8[>..]
     pos = npos;
     if root_remaining != -1 || root_indef {
         if stack.len >= MAX_DEPTH { return -1, false; }
-        stack.push(Work { parent: root, remaining: root_remaining });
+        stack.push(Work { parent: root, remaining: root_remaining, last: -1, kids: 0 });
     }
 
     // The work loop: fill the containers on the stack.
@@ -279,6 +333,8 @@ fn decode_value(s: const u8[:], pos: i64&, values: Value[>..]&, scratch: u8[>..]
             // Indefinite: the break byte ends the container.
             if pos >= s.len { return -1, false; }
             if s[pos] == 0xff {
+                // An indefinite map must end after a value, not after a key.
+                if values[top.parent].kind == K_MAP && top.kids % 2 == 1 { return -1, false; }
                 pos += 1;
                 stack.pop();
                 continue;
@@ -287,23 +343,20 @@ fn decode_value(s: const u8[:], pos: i64&, values: Value[>..]&, scratch: u8[>..]
         let child, npos2, c_remaining, c_indef, cok = read_one(s, pos, values, scratch);
         if !cok { return -1, false; }
         pos = npos2;
-        // Link the child as the last child of the parent.
-        let p = top.parent;
-        if values[p].first_child < 0 {
-            values[p].first_child = child;
+        // Link the child after the last child of the parent.
+        if top.last < 0 {
+            values[top.parent].first_child = child;
         } else {
-            var last = values[p].first_child;
-            while values[last].next_sibling >= 0 {
-                last = values[last].next_sibling;
-            }
-            values[last].next_sibling = child;
+            values[top.last].next_sibling = child;
         }
+        stack[stack.len - 1].last = child;
+        stack[stack.len - 1].kids += 1;
         if top.remaining > 0 {
             stack[stack.len - 1].remaining -= 1;
         }
         if c_remaining != -1 || c_indef {
             if stack.len >= MAX_DEPTH { return -1, false; }
-            stack.push(Work { parent: child, remaining: c_remaining });
+            stack.push(Work { parent: child, remaining: c_remaining, last: -1, kids: 0 });
         }
     }
     return root, true;
