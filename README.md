@@ -9,7 +9,9 @@ The package encodes the basic types in the preferred serialization of
 RFC 8949 section 4.1. Floats take 16, 32 or 64 bits, whichever keeps the
 value. A map has the core deterministic order (section 4.2.1) after
 `sort_map`. Named writers and readers cover the date, bignum and decimal
-tags. The decoder gives a tree of typed values, or one value at a time.
+tags.
+
+The decoder gives a tree of typed values, or one value at a time.
 Broken bytes fault instead of giving partial values. Pure Goose, no C.
 
 ## Install
