@@ -19,7 +19,7 @@ Broken bytes fault instead of giving partial values. Pure Goose, no C.
 Add this to the root file of the program that uses it:
 
 ```goose
-import cbor from "rekanalar/goose-cbor@v0.2.0";
+import cbor from "rekanalar/goose-cbor@v0.2.1";
 ```
 
 ## API
