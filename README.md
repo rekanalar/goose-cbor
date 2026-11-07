@@ -60,6 +60,8 @@ not n pairs.
   RFC 7049, which Python `cbor2` uses with `canonical=True`.
 - `sort_map` does not reject duplicate keys.
 - The encoder writes every NaN as `f97e00`. A NaN payload is lost.
+- The float code uses integer bit arithmetic only. It calls no `pow`, `log2` or `floor`.
+  It never divides by zero, because the macOS arm64 JIT mis-evaluates those.
 - `map_get` finds text keys only.
 - There is no writer for tag 5 (bigfloat) and no date parse.
 - A bignum has no conversion to a number type.

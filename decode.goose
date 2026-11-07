@@ -11,7 +11,6 @@
 namespace cbor;
 
 import std;
-import math;
 import value;
 
 const MAX_DEPTH = 64;
@@ -64,55 +63,70 @@ fn read_head(s: const u8[:], pos: i64&, major: i32&, arg: u64&) -> bool {
     return false;
 }
 
-// half_to_f64 expands one half-precision value in the 16 bits.
+// pow2 gives 2^k exactly for -1074 <= k <= 1024. Every step multiplies
+// or divides by two, so no step rounds; pow, log2 and floor are left
+// out because the TinyCC JIT on macOS/arm64 mis-evaluates them. Above
+// 1023 the loop overflows into an infinity, which is exactly what the
+// exponent fields 31 and 2047 need.
+recursive fn pow2(k: i64) -> f64 {
+    if k < 0 {
+        // 2^1074 alone overflows an f64, so split the power in two.
+        let h = k / 2;
+        return 1.0 / pow2(-h) / pow2(h - k);
+    }
+    var p: f64 = 1.0;
+    var i: i64 = 0;
+    while i < k { p = p * 2.0; i += 1; }
+    return p;
+}
+
+// signed puts the sign bit back: negation flips it, even on zero.
+fn signed(sign: u64, v: f64) -> f64 {
+    if sign == 1 { return -v; }
+    return v;
+}
+
+// half_to_f64 expands one half-precision value in the 16 bits. Every
+// product is an exact integer significand times an exact power of two.
 fn half_to_f64(h: u64) -> f64 {
-    let sign = if (h >> 15) & 1 == 1 { -1.0 } else { 1.0 };
+    let sign = (h >> 15) & 1;
     let exp = ((h >> 10) & 31) as i64;
-    let frac = (h & 1023) as f64;
-    if exp == 0 {
-        // Subnormal.
-        return sign * frac * pow(2.0, -24.0);
-    }
+    let frac = h & 1023;
     if exp == 31 {
-        if frac == 0.0 {
-            // Infinity: a large product stands in for it.
-            return sign * 1.0e308 * 10.0;
-        }
-        // NaN.
-        return 0.0 / 0.0;
+        if frac == 0 { return signed(sign, pow2(1024)); }
+        return pow2(1024) - pow2(1024);
     }
-    return sign * (1.0 + frac / 1024.0) * pow(2.0, exp - 15.0);
+    if exp == 0 { return signed(sign, frac * pow2(-24)); }
+    return signed(sign, (1024 + frac) * pow2(exp - 25));
 }
 
 // single_to_f64 expands one single-precision value in the 32 bits.
 fn single_to_f64(bits: u64) -> f64 {
-    let sign = if (bits >> 31) & 1 == 1 { -1.0 } else { 1.0 };
+    let sign = (bits >> 31) & 1;
     let exp = ((bits >> 23) & 255) as i64;
-    let frac = (bits & 8388607) as f64;
-    if exp == 0 { return sign * frac * pow(2.0, -149.0); }
+    let frac = bits & 8388607;
     if exp == 255 {
-        if frac == 0.0 { return sign * 1.0e308 * 10.0; }
-        return 0.0 / 0.0;
+        if frac == 0 { return signed(sign, pow2(1024)); }
+        return pow2(1024) - pow2(1024);
     }
-    return sign * (1.0 + frac / 8388608.0) * pow(2.0, exp - 127.0);
+    if exp == 0 { return signed(sign, frac * pow2(-149)); }
+    return signed(sign, (8388608 + frac) * pow2(exp - 150));
 }
 
 // bits_to_f64 rebuilds one f64 from its 64 bits.
 fn bits_to_f64(bits: u64) -> f64 {
-    let sign = if (bits >> 63) & 1 == 1 { -1.0 } else { 1.0 };
+    let sign = bits >> 63;
     let exp = ((bits >> 52) & 2047) as i64;
-    let frac = (bits & 4503599627370495) as f64;
-    if exp == 0 {
-        if frac == 0.0 { return sign * 0.0; }
-        return sign * frac * pow(2.0, -1074.0);
-    }
+    let frac = bits & 4503599627370495;
     if exp == 2047 {
-        if frac == 0.0 {
-            return sign * 1.0e308 * 10.0;
-        }
-        return 0.0 / 0.0;
+        if frac == 0 { return signed(sign, pow2(1024)); }
+        return pow2(1024) - pow2(1024);
     }
-    return sign * (1.0 + frac / 4503599627370496.0) * pow(2.0, exp - 1023.0);
+    if exp == 0 {
+        if frac == 0 { return signed(sign, 0.0); }
+        return signed(sign, frac * pow2(-1074));
+    }
+    return signed(sign, (4503599627370496 + frac) * pow2(exp - 1075));
 }
 
 // One work item of the explicit stack: a container that still needs

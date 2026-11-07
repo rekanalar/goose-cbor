@@ -7,7 +7,6 @@
 namespace cbor;
 
 import std;
-import math;
 import value;
 import decode;
 
@@ -214,67 +213,91 @@ fn item_end(s: const u8[:], pos: i64) -> i64 {
     return p;
 }
 
+// f64_bits gives the IEEE 754 bit pattern of v as a u64. It reads the
+// element bytes of an f64 array, so it runs no float arithmetic at all:
+// the TinyCC JIT on macOS/arm64 mis-evaluates the log2, pow, floor and
+// division-by-zero tricks that the old encoder used.
+fn f64_bits(v: f64) -> u64 {
+    let a: f64[1] = [v];
+    let b = bytes_of(a);
+    return b[0] | (b[1] as u64) << 8 | (b[2] as u64) << 16 | (b[3] as u64) << 24 |
+        (b[4] as u64) << 32 | (b[5] as u64) << 40 | (b[6] as u64) << 48 | (b[7] as u64) << 56;
+}
+
+// narrow_bits tries to pack the finite positive double s * 2^(ue-52)
+// (s holds the significand with the implicit bit) into a format with
+// mant fraction bits, least normal exponent emin and exponent bias
+// bias. It gives the packed exponent and fraction fields without the
+// sign, and false when the value is not exact in the format.
+fn narrow_bits(s: u64, ue: i64, mant: i64, emin: i64, bias: i64) -> u64, bool {
+    if ue >= emin {
+        // Normal target range: the format takes the top mant+1 bits
+        // of the significand, so the rest must be zero.
+        if ue > bias { return 0, false; }
+        let drop = 52 - mant;
+        if s & ((1 << drop) - 1) != 0 { return 0, false; }
+        // The top bit of s is the implicit one; it does not go out.
+        return ((ue + bias) as u64) << mant | s >> drop & ((1 << mant) - 1), true;
+    }
+    // Subnormal target range: the value must be a whole multiple of
+    // the smallest subnormal of the format. A shift past 63 bits means
+    // the value is far below it and never exact.
+    let sh = 52 + emin - mant - ue;
+    if sh > 63 { return 0, false; }
+    if s & ((1 << sh) - 1) != 0 { return 0, false; }
+    let f = s >> sh;
+    if f == 0 || f >= (1 << mant) { return 0, false; }
+    return f, true;
+}
+
 // encode_float writes one f64 in the shortest form that keeps the value
 // (RFC 8949 section 4.1): 16, 32 or 64 bits. Every NaN is 0xf97e00, so
 // the payload of a NaN is lost. The infinities are 0xf97c00 and 0xf9fc00.
+// All decisions run on the integer bit pattern of v.
 fn encode_float(out: u8[>..]&, v: f64) {
-    if v != v {
+    let bits = f64_bits(v);
+    let sign = bits >> 63;
+    let exp = ((bits >> 52) & 2047) as i64;
+    let frac = bits & 4503599627370495;
+    if exp == 2047 {
+        let h: u64 = if frac == 0 { sign << 15 | 0x7c00 } else { 0x7e00 };
         out.push(0xf9);
-        out.push(0x7e);
-        out.push(0x00);
+        out.push((h >> 8) as u8);
+        out.push(h as u8);
         return;
     }
-    let neg = v < 0.0 || (v == 0.0 && 1.0 / v < 0.0);
-    let a = if neg { -v } else { v };
-    let sign: u64 = if neg { 1 } else { 0 };
-    if a >= 1.0e308 * 10.0 {
+    if frac == 0 && exp == 0 {
+        let h = sign << 15;
         out.push(0xf9);
-        out.push((sign << 7 | 0x7c) as u8);
-        out.push(0x00);
+        out.push((h >> 8) as u8);
+        out.push(h as u8);
         return;
     }
-    if a == 0.0 || float_fits(a, -14, 15, 10) {
-        let bits = sign << 15 | float_pack(a, -14, 10, 15);
+    // s is the significand with the implicit bit; a double subnormal
+    // has none. The value is s * 2^(ue-52).
+    var s: u64 = frac;
+    if exp != 0 { s = s | 4503599627370496; }
+    let ue = exp - 1023;
+    let h, hok = narrow_bits(s, ue, 10, -14, 15);
+    if hok {
+        let b = sign << 15 | h;
         out.push(0xf9);
-        out.push((bits >> 8) as u8);
-        out.push(bits as u8);
-    } else if float_fits(a, -126, 127, 23) {
-        let bits = sign << 31 | float_pack(a, -126, 23, 127);
+        out.push((b >> 8) as u8);
+        out.push(b as u8);
+        return;
+    }
+    let w, sok = narrow_bits(s, ue, 23, -126, 127);
+    if sok {
+        let b = sign << 31 | w;
         out.push(0xfa);
         var shift = 24;
         while shift >= 0 {
-            out.push((bits >> shift) as u8);
+            out.push((b >> shift) as u8);
             shift -= 8;
         }
-    } else {
-        encode_float64_bits(out, sign, a);
-    }
-}
-
-// encode_float64 writes one f64 in the full 8-byte form, whatever the
-// value. Use it when a protocol wants no narrowing.
-fn encode_float64(out: u8[>..]&, v: f64) {
-    if v != v {
-        out.push(0xfb);
-        out.push(0x7f);
-        var k = 0;
-        out.push(0xf8);
-        while k < 6 { out.push(0x00); k += 1; }
         return;
     }
-    let neg = v < 0.0 || (v == 0.0 && 1.0 / v < 0.0);
-    let a = if neg { -v } else { v };
-    encode_float64_bits(out, if neg { 1 } else { 0 }, a);
-}
-
-fn encode_float64_bits(out: u8[>..]&, sign: u64, a: f64) {
     out.push(0xfb);
-    var bits: u64 = sign << 63;
-    if a >= 1.0e308 * 10.0 {
-        bits = bits | 9218868437227405312;
-    } else if a != 0.0 {
-        bits = bits | float_pack(a, -1022, 52, 1023);
-    }
     var shift = 56;
     while shift >= 0 {
         out.push((bits >> shift) as u8);
@@ -282,44 +305,17 @@ fn encode_float64_bits(out: u8[>..]&, sign: u64, a: f64) {
     }
 }
 
-// float_exp gives e with 2^e <= a < 2^(e+1) for a finite a above zero.
-fn float_exp(a: f64) -> i64 {
-    var e: i64 = floor(log2(a)) as i64;
-    // log2 can round across a power of two, so check both sides.
-    if a >= pow(2.0, e as f64 + 1.0) { e += 1; }
-    if a < pow(2.0, e as f64) { e -= 1; }
-    return e;
-}
-
-// subnormal_scale gives a * 2^k in two steps, because 2^1074 alone
-// overflows an f64.
-fn subnormal_scale(a: f64, k: i64) -> f64 {
-    return a * pow(2.0, (k / 2) as f64) * pow(2.0, (k - k / 2) as f64);
-}
-
-// float_fits tells whether a finite a above zero is exact in a binary
-// format with the least normal exponent e_min, the greatest exponent
-// e_max and mant fraction bits.
-fn float_fits(a: f64, e_min: i64, e_max: i64, mant: i64) -> bool {
-    let e = float_exp(a);
-    if e > e_max { return false; }
-    var x: f64 = 0.0;
-    if e < e_min {
-        x = subnormal_scale(a, mant - e_min);
-        if x < 1.0 { return false; }
-    } else {
-        x = (a / pow(2.0, e as f64) - 1.0) * pow(2.0, mant as f64);
+// encode_float64 writes one f64 in the full 8-byte form, whatever the
+// value. Use it when a protocol wants no narrowing.
+fn encode_float64(out: u8[>..]&, v: f64) {
+    var bits = f64_bits(v);
+    if bits >> 52 & 2047 == 2047 && bits & 4503599627370495 != 0 {
+        bits = 0x7ff8000000000000;
     }
-    return x == floor(x);
-}
-
-// float_pack gives the exponent and fraction bits of a finite a above
-// zero in the format of float_fits. The caller checked the fit.
-fn float_pack(a: f64, e_min: i64, mant: i64, bias: i64) -> u64 {
-    let e = float_exp(a);
-    if e < e_min {
-        return subnormal_scale(a, mant - e_min) as u64;
+    out.push(0xfb);
+    var shift = 56;
+    while shift >= 0 {
+        out.push((bits >> shift) as u8);
+        shift -= 8;
     }
-    let frac = ((a / pow(2.0, e as f64) - 1.0) * pow(2.0, mant as f64)) as u64;
-    return ((e + bias) as u64) << mant | frac;
 }
