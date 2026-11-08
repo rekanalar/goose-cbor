@@ -116,7 +116,7 @@ The test program holds 850 generated cases from `cbor2`. They are 281 decode cas
 The script `test/make_cbor_cases.py` makes them with a fixed seed.
 
 The test holds 120 more cases from `cbor2` with `canonical=True`.
-The script `specs/045-cbor-v1/make_cbor2_cases.py` makes them.
+The script `test/make_cbor2_cases.py` makes them.
 
 The hand cases hold the 97 inputs of the audit against `cbor2` and
 `fxamacker/cbor`. The hostile cases must finish in under one second.

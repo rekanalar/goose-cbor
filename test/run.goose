@@ -945,7 +945,6 @@ fn main() {
     test_hostile();
     test_cbor_cases();
 
-// The v1.0.0 stories: US1 to US8.
 
 fn test_decode_first() {
     var bytes: u8[>..] = [];
