@@ -13,8 +13,6 @@ namespace cbor;
 import std;
 import value;
 
-const MAX_DEPTH = 64;
-
 // read_head gives the major type and the argument of the header at pos.
 // The reader position moves past the header. A fault gives false.
 fn read_head(s: const u8[:], pos: i64&, major: i32&, arg: u64&) -> bool {
@@ -173,6 +171,85 @@ struct Work {
     kids: i64,
 }
 
+// DecodeOpts holds the options of decode_with. max_depth is the nesting
+// limit; the caller names 64 for the behaviour of decode, and a value
+// below 1 faults. reject_dups refuses a duplicate map key, as the
+// RejectDupMapKeyError of fxamacker does. check_tags checks the shape of
+// the well-known tags at decode, as cbor2 does.
+struct DecodeOpts {
+    max_depth: i64,
+    reject_dups: bool,
+    check_tags: bool,
+}
+
+// key_equal tells whether two nodes hold the same key value. It compares
+// by kind: numbers by their payload, strings by their bytes.
+fn key_equal(a: Value&, b: Value&) -> bool {
+    if a.kind != b.kind { return false; }
+    if a.kind == K_BYTES || a.kind == K_TEXT { return a.span == b.span; }
+    if a.kind == K_FLOAT { return a.float == b.float; }
+    return a.uint == b.uint;
+}
+
+// MAX_DUP_PAIRS is the pair count that the duplicate check accepts. The
+// check compares every key with the later keys, so its cost grows with
+// the square of the pair count. A map above the cap gives false under
+// the reject_dups option, and the decoder never spends long on it.
+const MAX_DUP_PAIRS: i64 = 1024;
+
+// map_keys_unique tells whether the pairs of the map node m hold no
+// duplicate key. The walk is quadratic in the pair count, and it runs
+// only when the caller asked for the check.
+fn map_keys_unique(values: Value[>..]&, m: i32) -> bool {
+    var keys: Value[>..] = [];
+    var id = values[m].first_child;
+    while id >= 0 {
+        keys.push(values[id]);
+        let vid = values[id].next_sibling;
+        if vid < 0 { return true; }
+        id = values[vid].next_sibling;
+        if keys.len > MAX_DUP_PAIRS { return false; }
+    }
+    var i: i64 = 0;
+    while i < keys.len {
+        var j = i + 1;
+        while j < keys.len {
+            if key_equal(keys[i], keys[j]) { return false; }
+            j += 1;
+        }
+        i += 1;
+    }
+    return true;
+}
+
+// tag_shape_ok tells whether the content of the tag node m has the shape
+// that cbor2 demands at decode. Tags 0 and 1 want a text or a number.
+// Tags 2 and 3 want bytes. Tags 4 and 5 want an array of exactly two
+// numbers. Every other tag passes.
+fn tag_shape_ok(values: Value[>..]&, m: i32) -> bool {
+    let tag = values[m].uint;
+    let c = values[m].first_child;
+    if c < 0 { return false; }
+    let k = values[c].kind;
+    if tag == 0 || tag == 1 {
+        return k == K_TEXT || k == K_UINT || k == K_NEG || k == K_FLOAT;
+    }
+    if tag == 2 || tag == 3 { return k == K_BYTES; }
+    if tag == 4 || tag == 5 {
+        if k != K_ARRAY { return false; }
+        var id = values[c].first_child;
+        var n: i64 = 0;
+        while id >= 0 {
+            let kk = values[id].kind;
+            if kk != K_UINT && kk != K_NEG && kk != K_FLOAT { return false; }
+            n += 1;
+            id = values[id].next_sibling;
+        }
+        return n == 2;
+    }
+    return true;
+}
+
 // read_one reads one value at pos and pushes the node. It gives the
 // node index, the new position, the child count (with maps doubled) or -1
 // when the value needs no children, the indefinite flag and the success
@@ -306,10 +383,12 @@ fn read_one(s: const u8[:], pos: i64, values: Value[>..]&, scratch: u8[>..]&) ->
     return -1, pos, remaining, indefinite, false;
 }
 
-// decode_value reads one value at pos into the arrays. The walk uses an
-// explicit stack, so no recursion runs. The stack depth is capped at
-// 64. The scratch buffer holds the joined bytes of indefinite strings.
-fn decode_value(s: const u8[:], pos: i64&, values: Value[>..]&, scratch: u8[>..]&) -> i32, bool {
+// decode_value_opt reads one value at pos into the arrays. It is the walk
+// of decode_value with the options of DecodeOpts. The stack depth is
+// capped at opts.max_depth, which is at least 1. The scratch buffer holds
+// the joined bytes of indefinite strings.
+fn decode_value_opt(s: const u8[:], pos: i64&, opts: DecodeOpts&, values: Value[>..]&, scratch: u8[>..]&) -> i32, bool {
+    if opts.max_depth < 1 { return -1, false; }
     var stack: Work[>..] = [];
 
     var root_remaining: i64 = -1;
@@ -318,7 +397,7 @@ fn decode_value(s: const u8[:], pos: i64&, values: Value[>..]&, scratch: u8[>..]
     if !ok { return -1, false; }
     pos = npos;
     if root_remaining != -1 || root_indef {
-        if stack.len >= MAX_DEPTH { return -1, false; }
+        if stack.len >= opts.max_depth { return -1, false; }
         stack.push(Work { parent: root, remaining: root_remaining, last: -1, kids: 0 });
     }
 
@@ -326,6 +405,14 @@ fn decode_value(s: const u8[:], pos: i64&, values: Value[>..]&, scratch: u8[>..]
     while stack.len > 0 {
         let top = stack[stack.len - 1];
         if top.remaining == 0 {
+            // A map closes: the keys may have to be unique. A tag closes:
+            // its content may have to fit the shape of the tag.
+            if opts.reject_dups && values[top.parent].kind == K_MAP {
+                if !map_keys_unique(values, top.parent) { return -1, false; }
+            }
+            if opts.check_tags && values[top.parent].kind == K_TAG {
+                if !tag_shape_ok(values, top.parent) { return -1, false; }
+            }
             stack.pop();
             continue;
         }
@@ -335,6 +422,9 @@ fn decode_value(s: const u8[:], pos: i64&, values: Value[>..]&, scratch: u8[>..]
             if s[pos] == 0xff {
                 // An indefinite map must end after a value, not after a key.
                 if values[top.parent].kind == K_MAP && top.kids % 2 == 1 { return -1, false; }
+                if opts.reject_dups && values[top.parent].kind == K_MAP {
+                    if !map_keys_unique(values, top.parent) { return -1, false; }
+                }
                 pos += 1;
                 stack.pop();
                 continue;
@@ -355,11 +445,19 @@ fn decode_value(s: const u8[:], pos: i64&, values: Value[>..]&, scratch: u8[>..]
             stack[stack.len - 1].remaining -= 1;
         }
         if c_remaining != -1 || c_indef {
-            if stack.len >= MAX_DEPTH { return -1, false; }
+            if stack.len >= opts.max_depth { return -1, false; }
             stack.push(Work { parent: child, remaining: c_remaining, last: -1, kids: 0 });
         }
     }
     return root, true;
+}
+
+// decode_value reads one value at pos into the arrays. The walk uses an
+// explicit stack, so no recursion runs. The stack depth is capped at
+// 64. The scratch buffer holds the joined bytes of indefinite strings.
+fn decode_value(s: const u8[:], pos: i64&, values: Value[>..]&, scratch: u8[>..]&) -> i32, bool {
+    var opts = DecodeOpts { max_depth: 64, reject_dups: false, check_tags: false };
+    return decode_value_opt(s, pos, opts, values, scratch);
 }
 
 // decode reads one value into the arrays of the caller. The arrays and
@@ -372,6 +470,26 @@ fn decode(s: const u8[:], values: Value[>..]&, scratch: u8[>..]&) -> Tree, bool 
     // Trailing bytes are a fault for a single document.
     if pos != s.len { return Tree { values: values[..], root: -1 }, false; }
     return Tree { values: values[..], root: root }, true;
+}
+
+// decode_with reads one document under the options. The rules of decode
+// hold: one document, trailing bytes fault.
+fn decode_with(s: const u8[:], opts: DecodeOpts&, values: Value[>..]&, scratch: u8[>..]&) -> Tree, bool {
+    var pos: i64 = 0;
+    let root, ok = decode_value_opt(s, pos, opts, values, scratch);
+    if !ok { return Tree { values: values[..], root: -1 }, false; }
+    if pos != s.len { return Tree { values: values[..], root: -1 }, false; }
+    return Tree { values: values[..], root: root }, true;
+}
+
+// decode_first reads the first item of the input and gives the number of
+// bytes that the item used. Trailing bytes are no fault: a caller feeds
+// the rest to the next call. This is the UnmarshalFirst of fxamacker.
+fn decode_first(s: const u8[:], values: Value[>..]&, scratch: u8[>..]&) -> Tree, i64, bool {
+    var pos: i64 = 0;
+    let root, ok = decode_value(s, pos, values, scratch);
+    if !ok { return Tree { values: values[..], root: -1 }, pos, false; }
+    return Tree { values: values[..], root: root }, pos, true;
 }
 
 // The typed API. Each read takes one value of the asked kind from the

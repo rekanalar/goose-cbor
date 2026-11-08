@@ -165,6 +165,15 @@ fn less_bytes(a: const u8[:], b: const u8[:]) -> bool {
 // One key and value of a map, as offsets into the output buffer.
 struct Pair { ks: i64, ke: i64, ve: i64 }
 
+// less_len_bytes is the order of RFC 7049: the encoded length of the key
+// decides first, then the bytes.
+fn less_len_bytes(out: const u8[:], a: Pair, b: Pair) -> bool {
+    let la = a.ke - a.ks;
+    let lb = b.ke - b.ks;
+    if la != lb { return la < lb; }
+    return less_bytes(out[a.ks..a.ke], out[b.ks..b.ke]);
+}
+
 // sort_map puts the pairs of a map in the core deterministic order. Call
 // encode_map_head(out, n), note start = out.len, write n key and value
 // pairs, then call sort_map(out, start, n, tmp). The tmp buffer is
@@ -200,6 +209,115 @@ fn sort_map(out: u8[>..]&, start: i64, n: i64, tmp: u8[>..]&) -> bool {
         }
     }
     return true;
+}
+
+// sort_map_rfc7049 puts the pairs of a map in the order of RFC 7049,
+// which cbor2 writes with canonical=True: the encoded length of the key
+// decides first, then the bytes. The use is the use of sort_map: encode
+// the pairs, then call. It gives false when the bytes after start are
+// not n pairs.
+fn sort_map_rfc7049(out: u8[>..]&, start: i64, n: i64, tmp: u8[>..]&) -> bool {
+    var pairs: Pair[>..] = [];
+    var pos = start;
+    var i: i64 = 0;
+    while i < n {
+        let ke = item_end(out[..], pos);
+        if ke < 0 { return false; }
+        let ve = item_end(out[..], ke);
+        if ve < 0 { return false; }
+        pairs.push(Pair { ks: pos, ke: ke, ve: ve });
+        pos = ve;
+        i += 1;
+    }
+    if pos != out.len { return false; }
+    tmp.append(out[start..]);
+    let base = tmp.len - (out.len - start);
+    sort(pairs[..]) { a, b => less_len_bytes(out[..], a, b) };
+    var w = start;
+    for p in pairs {
+        var r = base + (p.ks - start);
+        let end = base + (p.ve - start);
+        while r < end {
+            out[w] = tmp[r];
+            w += 1;
+            r += 1;
+        }
+    }
+    return true;
+}
+
+// encode_bigfloat writes tag 5: the value is mantissa * 2^exponent.
+fn encode_bigfloat(out: u8[>..]&, exponent: i64, mantissa: i64) {
+    write_head(out, 6, TAG_BIGFLOAT);
+    write_head(out, 4, 2);
+    encode_int(out, exponent);
+    encode_int(out, mantissa);
+}
+
+// count_children gives the number of the children of the node v.
+fn count_children(t: Tree&, v: Value&) -> i64 {
+    var n: i64 = 0;
+    var id = v.first_child;
+    while id >= 0 {
+        n += 1;
+        id = t.values[id].next_sibling;
+    }
+    return n;
+}
+
+// encode_tree writes the node v in the deterministic form. The minimal
+// heads and the shortest float always hold. The map keys sort by their
+// bytes, and they sort by their length first when len_first is true.
+// The length-first order is the one of RFC 7049, which cbor2 writes with
+// canonical=True. It gives false when the tree holds a node it cannot
+// write. The tmp buffer is the scratch space of the map sort.
+recursive fn encode_tree(t: Tree&, v: Value&, out: u8[>..]&, tmp: u8[>..]&, len_first: bool) -> bool {
+    let k = v.kind;
+    if k == K_UINT { write_head(out, 0, v.uint); return true; }
+    if k == K_NEG { write_head(out, 1, v.uint); return true; }
+    if k == K_BYTES { encode_bytes(out, v.span); return true; }
+    if k == K_TEXT { encode_text(out, v.span); return true; }
+    if k == K_BOOL { encode_bool(out, v.uint == 1); return true; }
+    if k == K_NULL { encode_null(out); return true; }
+    if k == K_UNDEFINED { write_head(out, 7, 23); return true; }
+    if k == K_SIMPLE {
+        // A simple value below 32 goes in the one-byte form.
+        if v.uint < 32 {
+            out.push((0xe0 | v.uint) as u8);
+        } else {
+            write_head(out, 7, v.uint);
+        }
+        return true;
+    }
+    if k == K_FLOAT { encode_float(out, v.float); return true; }
+    if k == K_TAG {
+        encode_tag(out, v.uint);
+        let c = v.first_child;
+        if c < 0 { return false; }
+        return encode_tree(t, t.values[c], out, tmp, len_first);
+    }
+    if k == K_ARRAY {
+        encode_array_head(out, count_children(t, v) as u64);
+        var id = v.first_child;
+        while id >= 0 {
+            if !encode_tree(t, t.values[id], out, tmp, len_first) { return false; }
+            id = t.values[id].next_sibling;
+        }
+        return true;
+    }
+    if k == K_MAP {
+        let pairs = count_children(t, v) / 2;
+        encode_map_head(out, pairs as u64);
+        let start = out.len;
+        var id = v.first_child;
+        while id >= 0 {
+            if !encode_tree(t, t.values[id], out, tmp, len_first) { return false; }
+            id = t.values[id].next_sibling;
+        }
+        if len_first { return sort_map_rfc7049(out, start, pairs, tmp); }
+        return sort_map(out, start, pairs, tmp);
+    }
+    return false;
 }
 
 // item_end gives the end offset of the data item that starts at pos, or

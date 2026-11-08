@@ -19,7 +19,7 @@ Broken bytes fault instead of giving partial values. The decoder never aborts on
 Add this to the root file of the program that uses it:
 
 ```goose
-import cbor from "rekanalar/goose-cbor@v0.3.0";
+import cbor from "rekanalar/goose-cbor@v1.0.0";
 ```
 
 ## API
@@ -35,18 +35,35 @@ import cbor from "rekanalar/goose-cbor@v0.3.0";
 | `sort_map(out, start, n, tmp)` | sort the pairs of a map in the bytewise order of the keys |
 | `encode_datetime_string`, `encode_epoch`, `encode_epoch_float` | write a tag 0 or tag 1 date |
 | `encode_bignum`, `encode_decimal` | write a bignum (tag 2 or 3) or a decimal (tag 4) |
+| `encode_bigfloat` | write a bigfloat (tag 5) |
+| `sort_map_rfc7049(out, start, n, tmp)` | sort the pairs of a map in the length-first order of RFC 7049 |
+| `encode_canonical(t, v, out)` | write a decoded value in the length-first order |
 | `decode(s, values, scratch)` | reads one value into the arrays of the caller |
+| `decode_with(s, opts, values, scratch)` | reads one value under the options of `DecodeOpts` |
+| `decode_first(s, values, scratch)` | reads the first item and gives the bytes it used |
+| `is_canonical(s)` | tells whether the bytes hold the core deterministic form |
 | `read_uint`, `read_int`, `read_text`, `read_bytes` | read one typed value from the front |
 | `read_float`, `read_bool`, `read_null` | read one typed value from the front |
 
+`DecodeOpts` holds the options of `decode_with`. `max_depth` is the
+nesting limit, and the caller names 64 for the behaviour of `decode`.
+`reject_dups` refuses a duplicate map key. `check_tags` checks the
+shape of the tags 0 to 5 at decode.
+
 The tree access helpers are `as_uint`, `as_int`, `as_text`, `as_bytes`,
 `as_float`, `as_bool`, `child_at`, `array_len` and `map_get`.
-`as_undefined` and `as_simple` read the simple values. The tag
-helpers are `as_tag`, `as_datetime_string`, `as_epoch` and `as_bignum`.
-The constants `TAG_EPOCH`, `TAG_BIGNUM_POS` and the like name the tags. The text
-and byte payloads are spans over the input, so the input must outlive
-the tree. The decode walk uses an explicit stack with a depth cap of
-64; deeper input faults.
+The lookups `map_get_uint`, `map_get_int` and `map_get_bytes` find a key
+of another kind than text.
+`as_undefined` and `as_simple` read the simple values.
+The tag helpers are `as_tag`, `as_datetime_string`, `as_epoch` and
+`as_bignum`.
+The tag helpers `bignum_as_int`, `as_bigfloat` and `datetime_to_epoch`
+read the numbers and the date of a tag.
+
+The constants `TAG_EPOCH`, `TAG_BIGNUM_POS` and the like name the tags.
+The text and byte payloads are spans over the input, so the input must
+outlive the tree. The decode walk uses an explicit stack with a depth
+cap of 64; deeper input faults. `decode_with` names its own cap.
 
 ## Deterministic maps
 
@@ -65,36 +82,51 @@ not n pairs.
 
 ## Limits
 
-- The order is bytewise (RFC 8949). It is not the length-first order of
-  RFC 7049, which Python `cbor2` uses with `canonical=True`.
-- `sort_map` does not reject duplicate keys.
+- `sort_map` gives the bytewise order of RFC 8949.
+  `sort_map_rfc7049` gives the length-first order of RFC 7049,
+  which Python `cbor2` uses with `canonical=True`.
 - The encoder writes every NaN as `f97e00`. A NaN payload is lost.
+  Python `cbor2` writes the same bytes and loses the payload too.
+  Go `fxamacker/cbor` keeps the payload by default, with
+  `NaNConvert.Off`. The two libraries disagree, and no RFC fixes one
+  rule, so the package follows `cbor2`.
 - The float code uses integer bit arithmetic only. It calls no `pow`, `log2` or `floor`.
   It never divides by zero, because the macOS arm64 JIT mis-evaluates those.
-- `map_get` finds text keys only.
-- There is no writer for tag 5 (bigfloat) and no date parse.
-- A bignum has no conversion to a number type.
-- The decoder accepts non-preferred forms and indefinite lengths. It
-  does not check that the input is deterministic.
-- `decode` reads one document. Bytes after it give false. Python `cbor2` skips them.
-- `decode` checks no tag content. `as_datetime_string`, `as_epoch` and `as_bignum` check it and give false. `cbor2` checks at decode.
-- The depth limit is 64. `cbor2` has no limit and Go `fxamacker/cbor` stops at 32 by default.
-- A duplicate map key is accepted, as `cbor2` does.
+- The decoder accepts non-preferred forms and indefinite lengths.
+  `is_canonical` tells whether the bytes hold the core deterministic
+  form.
+- `decode` reads one document. Bytes after it give false.
+  `decode_first` reads the first item and gives the bytes it used,
+  as Go `fxamacker/cbor` does with `UnmarshalFirst`.
+- `decode` checks no tag content. `decode_with` with `check_tags` checks
+  the shape of the tags 0 to 5 at decode, as `cbor2` does.
+- The depth limit of `decode` is 64. `decode_with` names its own cap.
+  `cbor2` has no limit and Go `fxamacker/cbor` stops at 32 by default.
+- A duplicate map key is accepted by `decode`, as `cbor2` does.
+  `decode_with` with `reject_dups` refuses it, as
+  `fxamacker/cbor` does with `RejectDupMapKeyError`.
+  The check compares every key with the later keys.
+  A map with more than 1024 pairs gives false under that option.
 - A decoded NaN keeps no payload and no sign. The bits of the NaN depend on the CPU.
 
 ## Test
 
 The test program holds 850 generated cases from `cbor2`. They are 281 decode cases,
-122 accept cases, 205 refuse cases and 242 encoder cases. The script
-`test/make_cbor_cases.py` makes them with a fixed seed. Hand cases hold the 97
-inputs of the audit against `cbor2` and `fxamacker/cbor`. The hostile cases
-must finish in under one second.
+122 accept cases, 205 refuse cases and 242 encoder cases.
+The script `test/make_cbor_cases.py` makes them with a fixed seed.
+
+The test holds 120 more cases from `cbor2` with `canonical=True`.
+The script `specs/045-cbor-v1/make_cbor2_cases.py` makes them.
+
+The hand cases hold the 97 inputs of the audit against `cbor2` and
+`fxamacker/cbor`. The hostile cases must finish in under one second.
 
 ```bash
 goose run test/run.goose
 goose run examples/roundtrip.goose
 goose run examples/deterministic.goose
 goose run examples/untrusted.goose
+goose run examples/stream.goose
 ```
 
 ## License
