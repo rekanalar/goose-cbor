@@ -86,8 +86,8 @@ The package decodes bytes from people we do not know. These protections
 go beyond the reference libraries.
 
 - The decoder compares every declared length and count with the bytes that
-  are left. A byte string with a huge length faults instead of taking
-  memory. Go `fxamacker/cbor` can take memory for a declared length.
+  are left. A byte string with a length of many bytes faults instead of
+  taking memory. Go `fxamacker/cbor` can take memory for a declared length.
 - The nesting depth is capped at 64. Python `cbor2` has no cap, and Go
   stops at 32.
 - The duplicate-key check refuses a map with more than 1024 pairs. The
