@@ -155,7 +155,7 @@ fn as_epoch(t: Tree&, v: Value&) -> f64, bool {
     let f, isf = as_float(c);
     if isf { return f, true; }
     let i, isi = as_int(c);
-    if isi { return i as f64, true; }
+    if isi { return i, true; }
     return 0.0, false;
 }
 
@@ -279,7 +279,7 @@ fn whole(f: f64) -> bool {
     if f != f { return false; }
     if f < -9223372036854775808.0 || f >= 9223372036854775808.0 { return false; }
     let i = f as i64;
-    return f == i as f64;
+    return f == i;
 }
 
 // int_part reads one number node as an i64. An integral float converts.

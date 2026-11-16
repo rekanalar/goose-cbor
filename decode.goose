@@ -27,20 +27,20 @@ fn read_head(s: const u8[:], pos: i64&, major: i32&, arg: u64&) -> bool {
     }
     if info == 24 {
         if pos >= s.len { return false; }
-        arg = s[pos] as u64;
+        arg = s[pos];
         pos += 1;
         return true;
     }
     if info == 25 {
         if pos + 1 >= s.len { return false; }
-        arg = (s[pos] as u64) << 8 | s[pos + 1] as u64;
+        arg = (s[pos] as u64) << 8 | s[pos + 1];
         pos += 2;
         return true;
     }
     if info == 26 {
         if pos + 3 >= s.len { return false; }
         arg = (s[pos] as u64) << 24 | (s[pos + 1] as u64) << 16
-            | (s[pos + 2] as u64) << 8 | (s[pos + 3] as u64);
+            | (s[pos + 2] as u64) << 8 | s[pos + 3];
         pos += 4;
         return true;
     }
@@ -49,7 +49,7 @@ fn read_head(s: const u8[:], pos: i64&, major: i32&, arg: u64&) -> bool {
         var v: u64 = 0;
         var k = 0;
         while k < 8 {
-            v = v << 8 | (s[pos + k] as u64);
+            v = v << 8 | s[pos + k];
             k += 1;
         }
         arg = v;
